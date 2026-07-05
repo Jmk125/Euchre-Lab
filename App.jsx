@@ -113,11 +113,16 @@ function hasRankInSuit(hand, suit, rank) {
 }
 function customRuleFires(hand, suit, rule) {
   if (!rule || !rule.enabled) return false;
+  const count = suitCount(hand, suit);
   if (rule.mode === "ranks") {
     const need = rule.ranks || [];
-    return need.length > 0 && need.every((r) => hasRankInSuit(hand, suit, r));
+    if (!need.length || !need.every((r) => hasRankInSuit(hand, suit, r))) return false;
+    // "exactOnly" means these ranks are the WHOLE trump holding, not just a subset of it
+    // (e.g. testing "what if I called with only 9-10", not "9-10 plus whatever else").
+    if (rule.exactOnly && count !== need.length) return false;
+    return true;
   }
-  if (suitCount(hand, suit) < rule.minCount) return false;
+  if (rule.exactOnly ? count !== rule.minCount : count < rule.minCount) return false;
   if (rule.requireBower && !hasBowerInSuit(hand, suit)) return false;
   return true;
 }
@@ -126,9 +131,11 @@ function ruleDesc(rule) {
   if (rule.mode === "ranks") {
     const ranks = rule.ranks || [];
     if (!ranks.length) return null;
-    return `Has ${ranks.map((r) => RANK_LABEL[r]).join("+")}`;
+    const label = ranks.map((r) => RANK_LABEL[r]).join("+");
+    return rule.exactOnly ? `Only ${label}` : `Has ${label}`;
   }
-  return `${rule.minCount}+ ${rule.requireBower ? "(needs bower)" : "(no bower needed)"}`;
+  const base = rule.exactOnly ? `Exactly ${rule.minCount}` : `${rule.minCount}+`;
+  return `${base} ${rule.requireBower ? "(needs bower)" : "(no bower needed)"}`;
 }
 
 /* ---------- hand-strength classification, for post-hoc stats ---------- */
@@ -439,7 +446,7 @@ export default function EuchreLab() {
   const [styles, setStyles] = useState(["balanced", "aggressive", "balanced", "conservative"]);
   const [customRules, setCustomRules] = useState(
     [0, 1, 2, 3].map(() => ({
-      enabled: false, mode: "count", minCount: 3, requireBower: true, ranks: [], goAlone: false,
+      enabled: false, mode: "count", minCount: 3, requireBower: true, ranks: [], exactOnly: false, goAlone: false,
     }))
   );
   const updateCustomRule = (seat, patch) =>
@@ -808,7 +815,7 @@ export default function EuchreLab() {
             {rule.mode === "count" ? (
               <>
                 <select value={rule.minCount} onChange={(e) => updateCustomRule(seat, { minCount: +e.target.value })}>
-                  {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}+ of a suit</option>)}
+                  {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} of a suit</option>)}
                 </select>
                 <label className="chk mini">
                   <input
@@ -818,8 +825,17 @@ export default function EuchreLab() {
                   />
                   needs a bower
                 </label>
+                <label className="chk mini">
+                  <input
+                    type="checkbox"
+                    checked={rule.exactOnly}
+                    onChange={(e) => updateCustomRule(seat, { exactOnly: e.target.checked })}
+                  />
+                  exactly {rule.minCount} (not {rule.minCount}+)
+                </label>
                 <span className="rule-note">
-                  Always calls the first suit with {rule.minCount}+ cards{rule.requireBower ? ", but only if it includes a bower" : " — even with no bower"}.
+                  Always calls the first suit with {rule.exactOnly ? "exactly" : "at least"} {rule.minCount} card{rule.minCount === 1 ? "" : "s"}
+                  {rule.requireBower ? ", but only if it includes a bower" : " — even with no bower"}.
                 </span>
               </>
             ) : (
@@ -832,9 +848,19 @@ export default function EuchreLab() {
                     </label>
                   ))}
                 </span>
+                <label className="chk mini">
+                  <input
+                    type="checkbox"
+                    checked={rule.exactOnly}
+                    onChange={(e) => updateCustomRule(seat, { exactOnly: e.target.checked })}
+                  />
+                  only these — no other trump cards
+                </label>
                 <span className="rule-note">
                   {(rule.ranks || []).length
-                    ? `Calls the first suit where the hand holds all of: ${rule.ranks.map((r) => RANK_LABEL[r]).join(", ")}.`
+                    ? rule.exactOnly
+                      ? `Calls the first suit where the hand's ENTIRE trump holding is exactly: ${rule.ranks.map((r) => RANK_LABEL[r]).join(", ")} (nothing else).`
+                      : `Calls the first suit where the hand holds at least: ${rule.ranks.map((r) => RANK_LABEL[r]).join(", ")} — extra trump cards are fine.`
                     : "Pick at least one rank above."}
                 </span>
               </>
