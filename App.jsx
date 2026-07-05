@@ -473,6 +473,7 @@ export default function EuchreLab() {
   const updateCustomRule = (seat, patch) =>
     setCustomRules((arr) => arr.map((r, i) => (i === seat ? { ...r, ...patch } : r)));
   const [stickDealer, setStickDealer] = useState(true);
+  const [allowRenege, setAllowRenege] = useState(false);
   const [simCount, setSimCount] = useState(1000);
   const [simRunning, setSimRunning] = useState(false);
   const [simDone, setSimDone] = useState(0);
@@ -574,6 +575,36 @@ export default function EuchreLab() {
     };
   };
 
+  // Reneging (failing to follow suit when able) is always caught instantly and costs
+  // the offender's team 2 points, ending the hand right there — no trick play involved.
+  const scoreRenege = (st, seat) => {
+    const winTeam = 1 - (seat % 2);
+    const pts = 2;
+
+    handCounter.current += 1;
+    const rec = {
+      n: handCounter.current, game: st.gameNum, src: "play",
+      dealer: st.dealer, caller: st.maker, callerStyle: st.maker === 0 ? "human" : styles[st.maker],
+      callerTeam: st.maker % 2, trump: st.trump, round: st.round, alone: st.alone,
+      upcard: cardId(st.upcard), tricksMaker: st.trickCount[st.maker % 2], pts, winTeam, euchred: false,
+      sweep: false, callerEval: null,
+      trumpCap: st.trumpCap, ruleFired: !!st.ruleFired, ruleDesc: st.ruleDesc || null, callType: st.callType,
+      renege: true,
+    };
+    setRecords((r) => [...r, rec]);
+
+    const score = st.score.slice();
+    score[winTeam] += pts;
+    const over = score[0] >= 10 || score[1] >= 10;
+    const resultTxt = `RENEGE! ${SEAT_POS[seat]} failed to follow suit and got caught — ${pts} pts to ${winTeam === 0 ? "your team" : "opponents"}.`;
+
+    return {
+      ...st, score, phase: over ? "gameOver" : "handEnd",
+      msg: over ? `${resultTxt}  Game over — ${score[0] >= 10 ? "YOUR TEAM WINS" : "OPPONENTS WIN"} ${score[0]}–${score[1]}.` : resultTxt,
+      lastResult: rec,
+    };
+  };
+
   const playCardTo = (st, seat, card) => {
     const hands = st.hands.map((h) => h.slice());
     hands[seat] = hands[seat].filter((c) => c !== card);
@@ -652,7 +683,10 @@ export default function EuchreLab() {
   const humanPlay = (card) => setG((st) => {
     if (st.phase !== "play" || st.turn !== 0) return st;
     const legal = legalMoves(st.hands[0], st.trick, st.trump);
-    if (!legal.includes(card)) return st;
+    if (!legal.includes(card)) {
+      if (!allowRenege) return st;
+      return scoreRenege(st, 0);
+    }
     return playCardTo(st, 0, card);
   });
   const nextHand = () => setG((st) => {
@@ -813,7 +847,7 @@ export default function EuchreLab() {
   }, [records, callTypeFilter]);
 
   const exportCSV = () => {
-    const cols = ["n", "src", "game", "dealer", "caller", "callerStyle", "callerTeam", "trump", "round", "alone", "upcard", "tricksMaker", "pts", "winTeam", "euchred", "sweep", "callerEval", "trumpCap", "ruleFired", "ruleDesc", "callType"];
+    const cols = ["n", "src", "game", "dealer", "caller", "callerStyle", "callerTeam", "trump", "round", "alone", "upcard", "tricksMaker", "pts", "winTeam", "euchred", "sweep", "callerEval", "trumpCap", "ruleFired", "ruleDesc", "callType", "renege"];
     const lines = [cols.join(",")];
     for (const r of records) lines.push(cols.map((c) => r[c] ?? "").join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
@@ -997,8 +1031,8 @@ export default function EuchreLab() {
                     : g.phase === "play" && g.turn === 0 ? () => humanPlay(c)
                     : undefined
                   }
-                  disabled={g.phase === "play" && g.turn === 0 && !myLegal.includes(c)}
-                  highlight={(g.phase === "play" && g.turn === 0 && myLegal.includes(c)) || g.phase === "discard"}
+                  disabled={g.phase === "play" && g.turn === 0 && !allowRenege && !myLegal.includes(c)}
+                  highlight={(g.phase === "play" && g.turn === 0 && (allowRenege || myLegal.includes(c))) || g.phase === "discard"}
                 />
               ))}
             </div>
@@ -1291,7 +1325,7 @@ export default function EuchreLab() {
                   <td className={RED[r.trump] ? "redtxt" : ""}>{SUIT_SYM[r.trump]}</td>
                   <td>{r.round}</td><td>{r.alone ? "★" : ""}</td><td>{r.upcard}</td>
                   <td>{r.tricksMaker}/5</td><td>{r.pts}</td>
-                  <td className={r.euchred ? "neg" : "pos"}>{r.euchred ? "Euchred" : r.sweep ? "Sweep" : "Made"}</td>
+                  <td className={r.euchred || r.renege ? "neg" : "pos"}>{r.renege ? "Reneged" : r.euchred ? "Euchred" : r.sweep ? "Sweep" : "Made"}</td>
                   <td>{r.callType ? CALL_TYPE_LABEL[r.callType] : ""}</td>
                   <td>{r.trumpCap ? TRUMP_CAP_LABEL[r.trumpCap] : ""}</td>
                   <td>{r.ruleFired ? r.ruleDesc : ""}</td>
@@ -1326,6 +1360,15 @@ export default function EuchreLab() {
             <span className="seat-setting">North (partner): {styleSelect(2)} {customRuleControls(2)}</span>
             <span className="seat-setting">East: {styleSelect(3)} {customRuleControls(3)}</span>
             <label className="chk"><input type="checkbox" checked={stickDealer} onChange={(e) => setStickDealer(e.target.checked)} /> Stick the dealer</label>
+            <label className="chk">
+              <input type="checkbox" checked={allowRenege} onChange={(e) => setAllowRenege(e.target.checked)} />
+              Allow reneging
+            </label>
+            {allowRenege && (
+              <span className="rule-note">
+                Illegal cards aren't blocked or dimmed — play one and it's caught instantly for 2 pts to the other team.
+              </span>
+            )}
           </div>
           {renderTable()}
         </>
@@ -1349,7 +1392,7 @@ const CSS = `
 .euchre-lab nav button.on { border-color:#c9a24b; color:#c9a24b; }
 .euchre-lab nav button:hover { color:#f0ead8; }
 
-.table-settings { display:flex; gap:18px; padding: 10px 26px; font-size:13px; color:#cfc8b8; flex-wrap:wrap; align-items:center; }
+.table-settings { display:flex; gap:18px; padding: 10px 26px; font-size:13px; color:#cfc8b8; flex-wrap:wrap; align-items:center; max-width: 900px; margin: 0 auto; box-sizing: border-box; }
 .table-settings select, .sim-seat select { background:#1d2a24; color:#f0ead8; border:1px solid #3a4a42; border-radius:4px; padding:3px 6px; font-family:inherit; }
 .seat-setting { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .chk { display:flex; align-items:center; gap:6px; cursor:pointer; }
@@ -1361,7 +1404,7 @@ const CSS = `
 .rank-grid { display:inline-flex; gap:6px; flex-wrap:wrap; }
 .rank-chip { background:#14201b; border:1px solid #3a4a42; border-radius:10px; padding:2px 8px; }
 
-.table-wrap { max-width: 900px; margin: 8px auto 0; padding: 0 16px; }
+.table-wrap { width: 900px; max-width: 100%; margin: 8px auto 0; padding: 0 16px; box-sizing: border-box; }
 .scoreboard { display:flex; align-items:center; justify-content:center; gap:18px; margin: 8px 0; }
 .score-team { display:flex; flex-direction:column; align-items:center; padding:6px 18px; border-radius:6px; background:#1d2a24; border:1px solid #3a4a42; }
 .score-team span { font-size:11px; text-transform:uppercase; letter-spacing:1px; color:#cfc8b8; }
