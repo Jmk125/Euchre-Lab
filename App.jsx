@@ -1465,7 +1465,7 @@ const CSS = `
 .row { display:flex; flex-direction:column; align-items:center; gap:6px; }
 .mid-row { display:flex; justify-content:space-between; align-items:center; margin: 8px 0; gap: 8px; }
 .side { display:flex; flex-direction:column; align-items:center; gap:6px; width: 120px; }
-.center { flex:1; display:flex; flex-direction:column; align-items:center; gap:8px; min-height: 230px; justify-content:center; }
+.center { flex:1; display:flex; flex-direction:column; align-items:center; gap:8px; height: 252px; justify-content:center; }
 
 .seat-tag { font-size:12px; letter-spacing:.5px; background:rgba(0,0,0,.3); padding:3px 10px; border-radius:12px; border:1px solid transparent; display:flex; gap:6px; align-items:center; }
 .seat-tag.turn { border-color:#c9a24b; color:#c9a24b; }
@@ -1484,8 +1484,8 @@ const CSS = `
 .pcard.hl:hover { transform: translateY(-8px); box-shadow: 0 8px 14px rgba(0,0,0,.5); transition: transform .12s; }
 button.pcard { -webkit-appearance:none; }
 
-.bot-cards { display:flex; gap:3px; }
-.bot-cards.vert { flex-direction:column; gap:2px; }
+.bot-cards { display:flex; gap:3px; min-height: 54px; }
+.bot-cards.vert { flex-direction:column; gap:2px; min-height: 168px; }
 .bot-cards.vert .pcard { height: 30px; width: 44px; }
 
 .upcard-zone { display:flex; align-items:center; gap:10px; }
@@ -1499,7 +1499,7 @@ button.pcard { -webkit-appearance:none; }
 .slot { width:36px; height:52px; border:1px dashed rgba(255,255,255,.2); border-radius:6px; }
 .trick-tally { font-size:12px; color:#cfe3d5; letter-spacing:.5px; }
 
-.my-hand { display:flex; gap:8px; padding-top:4px; flex-wrap:wrap; justify-content:center; }
+.my-hand { display:flex; gap:8px; padding-top:4px; flex-wrap:wrap; justify-content:center; min-height: 78px; }
 
 .msg-bar { text-align:center; margin: 12px auto 4px; font-size: 15px; color:#f0ead8; min-height: 22px; font-style: italic; }
 .action-bar { display:flex; justify-content:center; gap:10px; margin: 10px 0; flex-wrap:wrap; align-items:center; }
