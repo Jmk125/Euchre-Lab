@@ -93,22 +93,41 @@ function bestDiscard(hand, trump) {
 }
 
 /* ---------- custom "always call" rule engine ---------- */
-// A custom rule lets a seat override normal scoring-based bidding: "always call
-// trump the moment you have N+ cards of a suit" (optionally requiring a bower).
+// A custom rule lets a seat override normal scoring-based bidding, in one of two modes:
+//  - "count": always call the first suit with N+ cards (optionally requiring a bower)
+//  - "ranks": always call the first suit where the hand holds every one of a chosen
+//             set of ranks (e.g. Left bower + K + 10)
+const RANK_OPTIONS = ["right", "left", "A", "K", "Q", "10", "9"];
+const RANK_LABEL = { right: "Right", left: "Left", A: "A", K: "K", Q: "Q", "10": "10", "9": "9" };
+
 function suitCount(hand, suit) {
   return hand.filter((c) => effSuit(c, suit) === suit).length;
 }
 function hasBowerInSuit(hand, suit) {
   return hand.some((c) => isRight(c, suit) || isLeft(c, suit));
 }
+function hasRankInSuit(hand, suit, rank) {
+  if (rank === "right") return hand.some((c) => isRight(c, suit));
+  if (rank === "left") return hand.some((c) => isLeft(c, suit));
+  return hand.some((c) => c.suit === suit && c.rank === rank);
+}
 function customRuleFires(hand, suit, rule) {
   if (!rule || !rule.enabled) return false;
+  if (rule.mode === "ranks") {
+    const need = rule.ranks || [];
+    return need.length > 0 && need.every((r) => hasRankInSuit(hand, suit, r));
+  }
   if (suitCount(hand, suit) < rule.minCount) return false;
   if (rule.requireBower && !hasBowerInSuit(hand, suit)) return false;
   return true;
 }
 function ruleDesc(rule) {
   if (!rule || !rule.enabled) return null;
+  if (rule.mode === "ranks") {
+    const ranks = rule.ranks || [];
+    if (!ranks.length) return null;
+    return `Has ${ranks.map((r) => RANK_LABEL[r]).join("+")}`;
+  }
   return `${rule.minCount}+ ${rule.requireBower ? "(needs bower)" : "(no bower needed)"}`;
 }
 
@@ -419,7 +438,9 @@ export default function EuchreLab() {
   const [records, setRecords] = useState([]);
   const [styles, setStyles] = useState(["balanced", "aggressive", "balanced", "conservative"]);
   const [customRules, setCustomRules] = useState(
-    [0, 1, 2, 3].map(() => ({ enabled: false, minCount: 3, requireBower: true, goAlone: false }))
+    [0, 1, 2, 3].map(() => ({
+      enabled: false, mode: "count", minCount: 3, requireBower: true, ranks: [], goAlone: false,
+    }))
   );
   const updateCustomRule = (seat, patch) =>
     setCustomRules((arr) => arr.map((r, i) => (i === seat ? { ...r, ...patch } : r)));
@@ -669,6 +690,7 @@ export default function EuchreLab() {
 
     const ruleRows = Object.entries(byRule).map(([k, b]) => ({
       rule: k, calls: b.calls,
+      makeRate: +(((b.calls - b.euchres) / b.calls) * 100).toFixed(1),
       netPerCall: +((b.ptsFor - b.ptsAgainst) / b.calls).toFixed(3),
       euchreRate: +((b.euchres / b.calls) * 100).toFixed(1),
       sweepRate: +((b.sweeps / b.calls) * 100).toFixed(1),
@@ -733,6 +755,11 @@ export default function EuchreLab() {
 
   const customRuleControls = (seat) => {
     const rule = customRules[seat];
+    const toggleRank = (r) => {
+      const has = (rule.ranks || []).includes(r);
+      const ranks = has ? rule.ranks.filter((x) => x !== r) : [...(rule.ranks || []), r];
+      updateCustomRule(seat, { ranks });
+    };
     return (
       <span className="custom-rule-block">
         <label className="chk mini">
@@ -745,17 +772,46 @@ export default function EuchreLab() {
         </label>
         {rule.enabled && (
           <span className="rule-fields">
-            <select value={rule.minCount} onChange={(e) => updateCustomRule(seat, { minCount: +e.target.value })}>
-              {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}+ of a suit</option>)}
+            <select value={rule.mode} onChange={(e) => updateCustomRule(seat, { mode: e.target.value })}>
+              <option value="count">Count threshold</option>
+              <option value="ranks">Specific ranks</option>
             </select>
-            <label className="chk mini">
-              <input
-                type="checkbox"
-                checked={rule.requireBower}
-                onChange={(e) => updateCustomRule(seat, { requireBower: e.target.checked })}
-              />
-              needs a bower
-            </label>
+
+            {rule.mode === "count" ? (
+              <>
+                <select value={rule.minCount} onChange={(e) => updateCustomRule(seat, { minCount: +e.target.value })}>
+                  {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}+ of a suit</option>)}
+                </select>
+                <label className="chk mini">
+                  <input
+                    type="checkbox"
+                    checked={rule.requireBower}
+                    onChange={(e) => updateCustomRule(seat, { requireBower: e.target.checked })}
+                  />
+                  needs a bower
+                </label>
+                <span className="rule-note">
+                  Always calls the first suit with {rule.minCount}+ cards{rule.requireBower ? ", but only if it includes a bower" : " — even with no bower"}.
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="rank-grid">
+                  {RANK_OPTIONS.map((r) => (
+                    <label key={r} className="chk mini rank-chip">
+                      <input type="checkbox" checked={(rule.ranks || []).includes(r)} onChange={() => toggleRank(r)} />
+                      {RANK_LABEL[r]}
+                    </label>
+                  ))}
+                </span>
+                <span className="rule-note">
+                  {(rule.ranks || []).length
+                    ? `Calls the first suit where the hand holds all of: ${rule.ranks.map((r) => RANK_LABEL[r]).join(", ")}.`
+                    : "Pick at least one rank above."}
+                </span>
+              </>
+            )}
+
             <label className="chk mini">
               <input
                 type="checkbox"
@@ -764,9 +820,7 @@ export default function EuchreLab() {
               />
               alone
             </label>
-            <span className="rule-note">
-              Always calls the first suit with {rule.minCount}+ cards{rule.requireBower ? ", but only if it includes a bower" : " — even with no bower"}. Falls back to the style above otherwise.
-            </span>
+            <span className="rule-note">Falls back to the style above when the rule doesn't fire.</span>
           </span>
         )}
       </span>
@@ -935,15 +989,24 @@ export default function EuchreLab() {
         {stats.ruleRows.length > 0 && (
           <>
             <h3>Custom call-rule performance</h3>
-            <p className="sub">Only hands where a seat's "custom call rule" actually fired the call (as opposed to falling back to its base style).</p>
+            <p className="sub">
+              Only hands where a seat's "custom call rule" actually fired the call (as opposed to falling back to its
+              base style). <b>Make %</b> is the share of those calls where the caller took 3+ tricks and avoided a
+              euchre — it's just 100% − Euchred %, shown directly so you don't have to do the subtraction. <b>Sweep
+              %</b> (all 5 tricks) is a subset of Make %, not additional to it. <b>Net pts/call</b> is the average
+              scoreboard swing per call: euchres count against the caller's team, so a positive number means the rule
+              pays off over time even after euchre losses are factored in.
+            </p>
             <table className="data-table">
-              <thead><tr><th>Rule</th><th>Calls</th><th>Net pts / call</th><th>Euchred %</th><th>Sweep %</th></tr></thead>
+              <thead><tr><th>Rule</th><th>Calls</th><th>Make %</th><th>Sweep %</th><th>Euchred %</th><th>Net pts / call</th></tr></thead>
               <tbody>
                 {stats.ruleRows.map((r) => (
                   <tr key={r.rule}>
                     <td>{r.rule}</td><td>{r.calls}</td>
+                    <td className="pos">{r.makeRate}%</td>
+                    <td>{r.sweepRate}%</td>
+                    <td className="neg">{r.euchreRate}%</td>
                     <td className={r.netPerCall >= 0 ? "pos" : "neg"}>{r.netPerCall > 0 ? "+" : ""}{r.netPerCall}</td>
-                    <td>{r.euchreRate}%</td><td>{r.sweepRate}%</td>
                   </tr>
                 ))}
               </tbody>
@@ -1127,6 +1190,8 @@ const CSS = `
 .rule-fields { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .rule-fields select { background:#1d2a24; color:#f0ead8; border:1px solid #3a4a42; border-radius:4px; padding:2px 5px; font-family:inherit; font-size:12px; }
 .rule-note { font-size:11px; color:#9aa89f; font-style:italic; max-width:220px; }
+.rank-grid { display:inline-flex; gap:6px; flex-wrap:wrap; }
+.rank-chip { background:#14201b; border:1px solid #3a4a42; border-radius:10px; padding:2px 8px; }
 
 .table-wrap { max-width: 900px; margin: 8px auto 0; padding: 0 16px; }
 .scoreboard { display:flex; align-items:center; justify-content:center; gap:18px; margin: 8px 0; }
