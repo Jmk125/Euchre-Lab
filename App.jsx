@@ -447,6 +447,9 @@ export default function EuchreLab() {
   const [stickDealer, setStickDealer] = useState(true);
   const [simCount, setSimCount] = useState(1000);
   const [simRunning, setSimRunning] = useState(false);
+  const [simDone, setSimDone] = useState(0);
+  const simCancelRef = useRef(false);
+  useEffect(() => () => { simCancelRef.current = true; }, []);
 
   /* ---------------- interactive game state ---------------- */
   const [g, setG] = useState(null);
@@ -628,15 +631,40 @@ export default function EuchreLab() {
   });
 
   /* ---------------- simulation ---------------- */
+  // Runs in small async chunks (instead of one blocking call) so a progress bar can
+  // update and the tab stays responsive, however many hands are requested.
   const runSim = () => {
     setSimRunning(true);
-    setTimeout(() => {
-      const recs = simulateGames(simCount, styles, stickDealer, customRules);
-      setRecords((r) => [...r, ...recs]);
+    setSimDone(0);
+    simCancelRef.current = false;
+    const total = simCount;
+    const collected = [];
+    let done = 0;
+    let chunkSize = 300;
+
+    const finish = () => {
+      setRecords((r) => [...r, ...collected]);
       setSimRunning(false);
       setTab("stats");
-    }, 30);
+    };
+
+    const step = () => {
+      if (simCancelRef.current) { finish(); return; }
+      const target = Math.min(chunkSize, total - done);
+      const t0 = performance.now();
+      const recs = simulateGames(target, styles, stickDealer, customRules);
+      const elapsed = performance.now() - t0;
+      collected.push(...recs);
+      done += Math.max(recs.length, 1); // guard against a pathological all-redeal chunk stalling progress
+      setSimDone(Math.min(done, total));
+      if (elapsed > 0) chunkSize = Math.max(100, Math.round((chunkSize * 40) / elapsed));
+      if (done < total) setTimeout(step, 0);
+      else finish();
+    };
+    setTimeout(step, 20);
   };
+
+  const cancelSim = () => { simCancelRef.current = true; };
 
   /* ---------------- stats ---------------- */
   const stats = useMemo(() => {
@@ -943,17 +971,28 @@ export default function EuchreLab() {
       </div>
       <div className="sim-controls">
         <label>Hands to simulate
-          <input type="number" min="50" max="20000" value={simCount}
-            onChange={(e) => setSimCount(Math.min(20000, Math.max(50, +e.target.value || 0)))} />
+          <input type="number" min="50" value={simCount}
+            onChange={(e) => setSimCount(Math.max(50, +e.target.value || 0))} disabled={simRunning} />
         </label>
         <label className="chk">
-          <input type="checkbox" checked={stickDealer} onChange={(e) => setStickDealer(e.target.checked)} />
+          <input type="checkbox" checked={stickDealer} onChange={(e) => setStickDealer(e.target.checked)} disabled={simRunning} />
           Stick the dealer
         </label>
         <button className="btn primary big" onClick={runSim} disabled={simRunning}>
           {simRunning ? "Dealing…" : `Run ${simCount.toLocaleString()} hands`}
         </button>
+        {simRunning && <button className="btn danger" onClick={cancelSim}>Cancel</button>}
       </div>
+      {simRunning && (
+        <div className="sim-progress-wrap">
+          <div className="sim-progress-bar">
+            <div className="sim-progress-fill" style={{ width: `${Math.min(100, (simDone / simCount) * 100)}%` }} />
+          </div>
+          <div className="sim-progress-text">
+            {simDone.toLocaleString()} / {simCount.toLocaleString()} hands ({Math.min(100, Math.round((simDone / simCount) * 100))}%)
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -1267,6 +1306,11 @@ button.pcard { -webkit-appearance:none; }
 .sim-controls label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:#cfc8b8; }
 .sim-controls input[type=number] { background:#1d2a24; color:#f0ead8; border:1px solid #3a4a42; border-radius:4px; padding:6px 8px; width:110px; font-family:inherit; }
 .sim-controls .chk { flex-direction:row; }
+
+.sim-progress-wrap { margin-top:16px; }
+.sim-progress-bar { height:10px; border-radius:5px; background:#1d2a24; border:1px solid #3a4a42; overflow:hidden; }
+.sim-progress-fill { height:100%; background: linear-gradient(90deg, #c9a24b, #7fae8f); transition: width .12s linear; }
+.sim-progress-text { margin-top:6px; font-size:12px; color:#9aa89f; letter-spacing:.5px; }
 
 .stat-strip { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin: 16px 0; }
 .stat { background:#1d2a24; border:1px solid #3a4a42; border-radius:8px; padding:8px 16px; display:flex; flex-direction:column; align-items:center; }
