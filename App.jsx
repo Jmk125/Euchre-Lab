@@ -111,6 +111,9 @@ function hasRankInSuit(hand, suit, rank) {
   if (rank === "left") return hand.some((c) => isLeft(c, suit));
   return hand.some((c) => c.suit === suit && c.rank === rank);
 }
+function hasOffSuitAce(hand, suit) {
+  return hand.some((c) => c.rank === "A" && c.suit !== suit);
+}
 function customRuleFires(hand, suit, rule) {
   if (!rule || !rule.enabled) return false;
   const count = suitCount(hand, suit);
@@ -120,22 +123,33 @@ function customRuleFires(hand, suit, rule) {
     // "exactOnly" means these ranks are the WHOLE trump holding, not just a subset of it
     // (e.g. testing "what if I called with only 9-10", not "9-10 plus whatever else").
     if (rule.exactOnly && count !== need.length) return false;
-    return true;
+  } else {
+    if (rule.exactOnly ? count !== rule.minCount : count < rule.minCount) return false;
+    if (rule.requireBower && !hasBowerInSuit(hand, suit)) return false;
   }
-  if (rule.exactOnly ? count !== rule.minCount : count < rule.minCount) return false;
-  if (rule.requireBower && !hasBowerInSuit(hand, suit)) return false;
+  // exclusions apply regardless of mode: reject hands that hold a rank you said they
+  // shouldn't, or (commonly) an off-suit ace propping up the hand
+  const exclude = rule.excludeRanks || [];
+  if (exclude.some((r) => hasRankInSuit(hand, suit, r))) return false;
+  if (rule.noOffAce && hasOffSuitAce(hand, suit)) return false;
   return true;
 }
 function ruleDesc(rule) {
   if (!rule || !rule.enabled) return null;
+  let desc;
   if (rule.mode === "ranks") {
     const ranks = rule.ranks || [];
     if (!ranks.length) return null;
     const label = ranks.map((r) => RANK_LABEL[r]).join("+");
-    return rule.exactOnly ? `Only ${label}` : `Has ${label}`;
+    desc = rule.exactOnly ? `Only ${label}` : `Has ${label}`;
+  } else {
+    const base = rule.exactOnly ? `Exactly ${rule.minCount}` : `${rule.minCount}+`;
+    desc = `${base} ${rule.requireBower ? "(needs bower)" : "(no bower needed)"}`;
   }
-  const base = rule.exactOnly ? `Exactly ${rule.minCount}` : `${rule.minCount}+`;
-  return `${base} ${rule.requireBower ? "(needs bower)" : "(no bower needed)"}`;
+  const extras = [];
+  if ((rule.excludeRanks || []).length) extras.push(`no ${rule.excludeRanks.map((r) => RANK_LABEL[r]).join("/")}`);
+  if (rule.noOffAce) extras.push("no off-suit A");
+  return extras.length ? `${desc} [${extras.join(", ")}]` : desc;
 }
 
 /* ---------- hand-strength classification, for post-hoc stats ---------- */
@@ -467,7 +481,8 @@ export default function EuchreLab() {
   const [styles, setStyles] = useState(["balanced", "aggressive", "balanced", "conservative"]);
   const [customRules, setCustomRules] = useState(
     [0, 1, 2, 3].map(() => ({
-      enabled: false, mode: "count", minCount: 3, requireBower: true, ranks: [], exactOnly: false, goAlone: false,
+      enabled: false, mode: "count", minCount: 3, requireBower: true, ranks: [], exactOnly: false,
+      excludeRanks: [], noOffAce: false, goAlone: false,
     }))
   );
   const updateCustomRule = (seat, patch) =>
@@ -880,6 +895,11 @@ export default function EuchreLab() {
       const ranks = has ? rule.ranks.filter((x) => x !== r) : [...(rule.ranks || []), r];
       updateCustomRule(seat, { ranks });
     };
+    const toggleExcludeRank = (r) => {
+      const has = (rule.excludeRanks || []).includes(r);
+      const excludeRanks = has ? rule.excludeRanks.filter((x) => x !== r) : [...(rule.excludeRanks || []), r];
+      updateCustomRule(seat, { excludeRanks });
+    };
     return (
       <span className="custom-rule-block">
         <label className="chk mini">
@@ -950,6 +970,34 @@ export default function EuchreLab() {
                 </span>
               </>
             )}
+
+            <span className="exclude-block">
+              <span className="rule-subhead">Must NOT have:</span>
+              <span className="rank-grid">
+                {RANK_OPTIONS.map((r) => (
+                  <label key={r} className="chk mini rank-chip">
+                    <input type="checkbox" checked={(rule.excludeRanks || []).includes(r)} onChange={() => toggleExcludeRank(r)} />
+                    {RANK_LABEL[r]}
+                  </label>
+                ))}
+              </span>
+              <label className="chk mini">
+                <input
+                  type="checkbox"
+                  checked={rule.noOffAce}
+                  onChange={(e) => updateCustomRule(seat, { noOffAce: e.target.checked })}
+                />
+                no off-suit aces
+              </label>
+              {((rule.excludeRanks || []).length > 0 || rule.noOffAce) && (
+                <span className="rule-note">
+                  Skips any suit where the hand also holds
+                  {(rule.excludeRanks || []).length ? ` ${rule.excludeRanks.map((r) => RANK_LABEL[r]).join(", ")}` : ""}
+                  {(rule.excludeRanks || []).length && rule.noOffAce ? " or" : ""}
+                  {rule.noOffAce ? " an ace outside the called suit" : ""}.
+                </span>
+              )}
+            </span>
 
             <label className="chk mini">
               <input
@@ -1403,6 +1451,8 @@ const CSS = `
 .rule-note { font-size:11px; color:#9aa89f; font-style:italic; max-width:220px; }
 .rank-grid { display:inline-flex; gap:6px; flex-wrap:wrap; }
 .rank-chip { background:#14201b; border:1px solid #3a4a42; border-radius:10px; padding:2px 8px; }
+.exclude-block { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; background:rgba(179,86,74,.08); border:1px solid #4a3a3a; border-radius:6px; padding:4px 8px; }
+.rule-subhead { font-size:11px; color:#e0736a; text-transform:uppercase; letter-spacing:.5px; }
 
 .table-wrap { width: 900px; max-width: 100%; margin: 8px auto 0; padding: 0 16px; box-sizing: border-box; }
 .scoreboard { display:flex; align-items:center; justify-content:center; gap:18px; margin: 8px 0; }
