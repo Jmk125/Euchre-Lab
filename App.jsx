@@ -92,14 +92,56 @@ function bestDiscard(hand, trump) {
   return worst;
 }
 
+/* ---------- custom "always call" rule engine ---------- */
+// A custom rule lets a seat override normal scoring-based bidding: "always call
+// trump the moment you have N+ cards of a suit" (optionally requiring a bower).
+function suitCount(hand, suit) {
+  return hand.filter((c) => effSuit(c, suit) === suit).length;
+}
+function hasBowerInSuit(hand, suit) {
+  return hand.some((c) => isRight(c, suit) || isLeft(c, suit));
+}
+function customRuleFires(hand, suit, rule) {
+  if (!rule || !rule.enabled) return false;
+  if (suitCount(hand, suit) < rule.minCount) return false;
+  if (rule.requireBower && !hasBowerInSuit(hand, suit)) return false;
+  return true;
+}
+function ruleDesc(rule) {
+  if (!rule || !rule.enabled) return null;
+  return `${rule.minCount}+ ${rule.requireBower ? "(needs bower)" : "(no bower needed)"}`;
+}
+
+/* ---------- hand-strength classification, for post-hoc stats ---------- */
+// The highest-value trump asset a hand holds, in euchre power order.
+function trumpProfile(hand, trump) {
+  if (hand.some((c) => isRight(c, trump))) return "right";
+  if (hand.some((c) => isLeft(c, trump))) return "left";
+  const ranks = hand.filter((c) => c.suit === trump).map((c) => c.rank);
+  for (const r of ["A", "K", "Q", "10", "9"]) if (ranks.includes(r)) return r;
+  return "none";
+}
+const TRUMP_CAP_ORDER = ["right", "left", "A", "K", "Q", "10", "9", "none"];
+const TRUMP_CAP_LABEL = {
+  right: "Right bower", left: "Left bower", A: "Ace-high", K: "King-high",
+  Q: "Queen-high", "10": "10-high", "9": "9-high", none: "No trump",
+};
+
 /* Round 1 bid: order the upcard's suit as trump? */
-function botBidR1(hand, upcard, seat, dealer, style) {
+function botBidR1(hand, upcard, seat, dealer, style, customRule) {
   const trump = upcard.suit;
-  let score;
+  let pickupHand = hand;
   if (seat === dealer) {
     const h = hand.concat([upcard]);
     const disc = bestDiscard(h, trump);
-    score = evalHand(h.filter((c) => c !== disc), trump) + 0.3;
+    pickupHand = h.filter((c) => c !== disc);
+  }
+  if (customRuleFires(pickupHand, trump, customRule)) {
+    return { call: true, alone: !!customRule.goAlone && hasBowerInSuit(pickupHand, trump), customFired: true };
+  }
+  let score;
+  if (seat === dealer) {
+    score = evalHand(pickupHand, trump) + 0.3;
   } else {
     score = evalHand(hand, trump);
     const upVal = upcard.rank === "J" ? 2.4 : { A: 1.6, K: 1.2, Q: 1.0, "10": 0.8, "9": 0.7 }[upcard.rank];
@@ -112,7 +154,20 @@ function botBidR1(hand, upcard, seat, dealer, style) {
 }
 
 /* Round 2 bid: name any suit except the turned-down one */
-function botBidR2(hand, turnedSuit, seat, dealer, style, stickDealer) {
+function botBidR2(hand, turnedSuit, seat, dealer, style, stickDealer, customRule) {
+  if (customRule && customRule.enabled) {
+    let bestSuit = null, bestCount = -1;
+    for (const s of SUITS) {
+      if (s === turnedSuit) continue;
+      if (customRuleFires(hand, s, customRule)) {
+        const c = suitCount(hand, s);
+        if (c > bestCount) { bestCount = c; bestSuit = s; }
+      }
+    }
+    if (bestSuit) {
+      return { suit: bestSuit, alone: !!customRule.goAlone && hasBowerInSuit(hand, bestSuit), customFired: true };
+    }
+  }
   const cfg = STYLES[style];
   let best = null, bestScore = -1;
   for (const s of SUITS) {
@@ -203,29 +258,39 @@ function chooseCard(hand, trick, trump, seat, maker, style, playedCards) {
 }
 
 /* ---------- full-hand runner (used by simulation) ---------- */
-function runBidding(hands, upcard, dealer, styles, stickDealer, humanNone) {
-  // returns { trump, maker, alone, round, dealerPickedUp } or null (all pass, no stick)
+function runBidding(hands, upcard, dealer, styles, stickDealer, customRules) {
+  // returns { trump, maker, alone, round, ruleFired, ruleDesc } or null (all pass, no stick)
   for (let i = 1; i <= 4; i++) {
     const seat = (dealer + i) % 4;
-    const r = botBidR1(hands[seat], upcard, seat, dealer, styles[seat]);
-    if (r.call) return { trump: upcard.suit, maker: seat, alone: r.alone, round: 1 };
+    const r = botBidR1(hands[seat], upcard, seat, dealer, styles[seat], customRules?.[seat]);
+    if (r.call) {
+      return {
+        trump: upcard.suit, maker: seat, alone: r.alone, round: 1,
+        ruleFired: !!r.customFired, ruleDesc: r.customFired ? ruleDesc(customRules[seat]) : null,
+      };
+    }
   }
   for (let i = 1; i <= 4; i++) {
     const seat = (dealer + i) % 4;
-    const r = botBidR2(hands[seat], upcard.suit, seat, dealer, styles[seat], stickDealer);
-    if (r.suit) return { trump: r.suit, maker: seat, alone: r.alone, round: 2 };
+    const r = botBidR2(hands[seat], upcard.suit, seat, dealer, styles[seat], stickDealer, customRules?.[seat]);
+    if (r.suit) {
+      return {
+        trump: r.suit, maker: seat, alone: r.alone, round: 2,
+        ruleFired: !!r.customFired, ruleDesc: r.customFired ? ruleDesc(customRules[seat]) : null,
+      };
+    }
   }
   return null;
 }
 
-function simulateHand(dealer, styles, stickDealer) {
+function simulateHand(dealer, styles, stickDealer, customRules) {
   const deck = shuffle(makeDeck());
   const hands = [0, 1, 2, 3].map((i) => deck.slice(i * 5, i * 5 + 5));
   const upcard = deck[20];
-  const bid = runBidding(hands, upcard, dealer, styles, stickDealer);
+  const bid = runBidding(hands, upcard, dealer, styles, stickDealer, customRules);
   if (!bid) return null; // redeal
 
-  const { trump, maker, alone, round } = bid;
+  const { trump, maker, alone, round, ruleFired, ruleDesc: rDesc } = bid;
   const sitter = alone ? (maker + 2) % 4 : null;
   const callerScore = evalHand(hands[maker], trump);
 
@@ -235,6 +300,8 @@ function simulateHand(dealer, styles, stickDealer) {
     const disc = bestDiscard(hands[dealer], trump);
     hands[dealer] = hands[dealer].filter((c) => c !== disc);
   }
+
+  const trumpCap = trumpProfile(hands[maker], trump);
 
   let leader = (dealer + 1) % 4;
   if (leader === sitter) leader = (dealer + 2) % 4;
@@ -277,16 +344,17 @@ function simulateHand(dealer, styles, stickDealer) {
     trump, round, alone, upcard: cardId(upcard),
     tricksMaker: mTricks, pts, winTeam, euchred,
     sweep: mTricks === 5, callerEval: Math.round(callerScore * 10) / 10,
+    trumpCap, ruleFired: !!ruleFired, ruleDesc: rDesc || null,
   };
 }
 
-function simulateGames(targetHands, styles, stickDealer) {
+function simulateGames(targetHands, styles, stickDealer, customRules) {
   const records = [];
   let game = 1, dealer = Math.floor(Math.random() * 4);
   let score = [0, 0], handNum = 0, guard = 0;
   while (records.length < targetHands && guard < targetHands * 4) {
     guard++;
-    const r = simulateHand(dealer, styles, stickDealer);
+    const r = simulateHand(dealer, styles, stickDealer, customRules);
     dealer = (dealer + 1) % 4;
     if (!r) continue;
     handNum++;
@@ -350,6 +418,11 @@ export default function EuchreLab() {
   const [tab, setTab] = useState("play");
   const [records, setRecords] = useState([]);
   const [styles, setStyles] = useState(["balanced", "aggressive", "balanced", "conservative"]);
+  const [customRules, setCustomRules] = useState(
+    [0, 1, 2, 3].map(() => ({ enabled: false, minCount: 3, requireBower: true, goAlone: false }))
+  );
+  const updateCustomRule = (seat, patch) =>
+    setCustomRules((arr) => arr.map((r, i) => (i === seat ? { ...r, ...patch } : r)));
   const [stickDealer, setStickDealer] = useState(true);
   const [simCount, setSimCount] = useState(1000);
   const [simRunning, setSimRunning] = useState(false);
@@ -373,6 +446,7 @@ export default function EuchreLab() {
       msg: `${SEAT_POS[(dealer + 1) % 4]} bids first. Dealer: ${SEAT_POS[dealer]}.`,
       lastResult: null,
       played: [],
+      ruleFired: false, ruleDesc: null, trumpCap: null,
     };
   }, []);
 
@@ -392,9 +466,12 @@ export default function EuchreLab() {
     };
   };
 
-  const applyCall = (st, seat, trump, alone, round) => {
+  const applyCall = (st, seat, trump, alone, round, customFired = false, rule = null) => {
     const sitter = alone ? (seat + 2) % 4 : null;
-    let next = { ...st, trump, maker: seat, alone, round, sitter };
+    let next = {
+      ...st, trump, maker: seat, alone, round, sitter,
+      ruleFired: !!customFired, ruleDesc: customFired ? ruleDesc(rule) : null,
+    };
     if (round === 1 && sitter !== st.dealer) {
       const hands = next.hands.map((h) => h.slice());
       hands[st.dealer] = hands[st.dealer].concat([st.upcard]);
@@ -404,7 +481,9 @@ export default function EuchreLab() {
       }
       const disc = bestDiscard(hands[st.dealer], trump);
       hands[st.dealer] = hands[st.dealer].filter((c) => c !== disc);
-      next = { ...next, hands };
+      next = { ...next, hands, trumpCap: trumpProfile(hands[seat], trump) };
+    } else {
+      next = { ...next, trumpCap: trumpProfile(next.hands[seat], trump) };
     }
     return beginPlay(next);
   };
@@ -423,6 +502,7 @@ export default function EuchreLab() {
       callerTeam: makerTeam, trump: st.trump, round: st.round, alone: st.alone,
       upcard: cardId(st.upcard), tricksMaker: mTricks, pts, winTeam, euchred,
       sweep: mTricks === 5, callerEval: null,
+      trumpCap: st.trumpCap, ruleFired: !!st.ruleFired, ruleDesc: st.ruleDesc || null,
     };
     setRecords((r) => [...r, rec]);
 
@@ -470,14 +550,14 @@ export default function EuchreLab() {
         if (!st) return st;
         if (st.phase === "trickPause") return resolveTrick(st);
         if (st.phase === "bid1" && st.turn !== 0) {
-          const r = botBidR1(st.hands[st.turn], st.upcard, st.turn, st.dealer, styles[st.turn]);
-          if (r.call) return applyCall(st, st.turn, st.upcard.suit, r.alone, 1);
+          const r = botBidR1(st.hands[st.turn], st.upcard, st.turn, st.dealer, styles[st.turn], customRules[st.turn]);
+          if (r.call) return applyCall(st, st.turn, st.upcard.suit, r.alone, 1, r.customFired, customRules[st.turn]);
           if (st.turn === st.dealer) return { ...st, phase: "bid2", turn: (st.dealer + 1) % 4, msg: `Everyone passed. ${SUIT_SYM[st.upcard.suit]} is turned down — name a suit.` };
           return { ...st, turn: (st.turn + 1) % 4, msg: `${SEAT_POS[st.turn]} passes.` };
         }
         if (st.phase === "bid2" && st.turn !== 0) {
-          const r = botBidR2(st.hands[st.turn], st.upcard.suit, st.turn, st.dealer, styles[st.turn], stickDealer);
-          if (r.suit) return applyCall(st, st.turn, r.suit, r.alone, 2);
+          const r = botBidR2(st.hands[st.turn], st.upcard.suit, st.turn, st.dealer, styles[st.turn], stickDealer, customRules[st.turn]);
+          if (r.suit) return applyCall(st, st.turn, r.suit, r.alone, 2, r.customFired, customRules[st.turn]);
           if (st.turn === st.dealer) {
             gameCounter.current = st.gameNum;
             return { ...newDeal(st.score, (st.dealer + 1) % 4, st.gameNum), msg: "All passed — redeal." };
@@ -492,7 +572,7 @@ export default function EuchreLab() {
       });
     }, g.phase === "trickPause" ? 950 : 620);
     return () => clearTimeout(t);
-  }, [g, tab, styles, stickDealer, newDeal]);
+  }, [g, tab, styles, stickDealer, newDeal, customRules]);
 
   /* human actions */
   const humanBid1 = (call, alone) => setG((st) => {
@@ -512,7 +592,8 @@ export default function EuchreLab() {
   const humanDiscard = (card) => setG((st) => {
     const hands = st.hands.map((h) => h.slice());
     hands[0] = hands[0].filter((c) => c !== card);
-    return beginPlay({ ...st, hands });
+    const trumpCap = trumpProfile(hands[st.maker], st.trump);
+    return beginPlay({ ...st, hands, trumpCap });
   });
   const humanPlay = (card) => setG((st) => {
     if (st.phase !== "play" || st.turn !== 0) return st;
@@ -529,7 +610,7 @@ export default function EuchreLab() {
   const runSim = () => {
     setSimRunning(true);
     setTimeout(() => {
-      const recs = simulateGames(simCount, styles, stickDealer);
+      const recs = simulateGames(simCount, styles, stickDealer, customRules);
       setRecords((r) => [...r, ...recs]);
       setSimRunning(false);
       setTab("stats");
@@ -543,6 +624,8 @@ export default function EuchreLab() {
     const bySeat = [0, 1, 2, 3].map(() => ({ calls: 0, pts: 0, euchres: 0 }));
     const bySuit = { S: 0, H: 0, D: 0, C: 0 };
     const outcomes = { "Made (1)": 0, "Sweep (2)": 0, "Alone sweep (4)": 0, "Euchred": 0 };
+    const byRule = {};
+    const byCap = {};
     let lonerAttempts = 0, lonerMade = 0, r1 = 0, r2 = 0;
 
     for (const r of records) {
@@ -560,16 +643,46 @@ export default function EuchreLab() {
       else if (r.alone && r.sweep) outcomes["Alone sweep (4)"]++;
       else if (r.sweep) outcomes["Sweep (2)"]++;
       else outcomes["Made (1)"]++;
+
+      if (r.ruleFired && r.ruleDesc) {
+        if (!byRule[r.ruleDesc]) byRule[r.ruleDesc] = { calls: 0, ptsFor: 0, ptsAgainst: 0, euchres: 0, sweeps: 0 };
+        const b = byRule[r.ruleDesc];
+        b.calls++;
+        if (r.euchred) { b.euchres++; b.ptsAgainst += r.pts; } else { b.ptsFor += r.pts; if (r.sweep) b.sweeps++; }
+      }
+      if (r.trumpCap) {
+        if (!byCap[r.trumpCap]) byCap[r.trumpCap] = { calls: 0, ptsFor: 0, ptsAgainst: 0, euchres: 0, sweeps: 0 };
+        const c = byCap[r.trumpCap];
+        c.calls++;
+        if (r.euchred) { c.euchres++; c.ptsAgainst += r.pts; } else { c.ptsFor += r.pts; if (r.sweep) c.sweeps++; }
+      }
     }
 
     const styleRows = Object.entries(byStyle).map(([k, s]) => ({
-      style: k === "human" ? "You" : STYLES[k]?.label || k,
+      styleName: k === "human" ? "You" : STYLES[k]?.label || k,
       calls: s.calls,
       netPerCall: +((s.ptsFor - s.ptsAgainst) / s.calls).toFixed(3),
       euchreRate: +((s.euchres / s.calls) * 100).toFixed(1),
       sweepRate: +((s.sweeps / s.calls) * 100).toFixed(1),
       loners: s.loners, lonersMade: s.lonersMade,
     }));
+
+    const ruleRows = Object.entries(byRule).map(([k, b]) => ({
+      rule: k, calls: b.calls,
+      netPerCall: +((b.ptsFor - b.ptsAgainst) / b.calls).toFixed(3),
+      euchreRate: +((b.euchres / b.calls) * 100).toFixed(1),
+      sweepRate: +((b.sweeps / b.calls) * 100).toFixed(1),
+    }));
+
+    const capRows = TRUMP_CAP_ORDER.filter((k) => byCap[k]).map((k) => {
+      const b = byCap[k];
+      return {
+        cap: TRUMP_CAP_LABEL[k], calls: b.calls,
+        makeRate: +(((b.calls - b.euchres) / b.calls) * 100).toFixed(1),
+        netPerCall: +((b.ptsFor - b.ptsAgainst) / b.calls).toFixed(3),
+        euchreRate: +((b.euchres / b.calls) * 100).toFixed(1),
+      };
+    });
 
     // rolling maker-make rate (window 25)
     const W = 25, trend = [];
@@ -583,7 +696,7 @@ export default function EuchreLab() {
       total: records.length, r1, r2,
       euchreRate: ((records.filter((r) => r.euchred).length / records.length) * 100).toFixed(1),
       lonerAttempts, lonerMade,
-      styleRows,
+      styleRows, ruleRows, capRows,
       suitData: SUITS.map((s) => ({ suit: SUIT_NAME[s], count: bySuit[s] })),
       outcomeData: Object.entries(outcomes).map(([k, v]) => ({ outcome: k, count: v })),
       seatData: bySeat.map((s, i) => ({ seat: SEAT_POS[i], calls: s.calls, euchres: s.euchres })),
@@ -592,7 +705,7 @@ export default function EuchreLab() {
   }, [records]);
 
   const exportCSV = () => {
-    const cols = ["n", "src", "game", "dealer", "caller", "callerStyle", "callerTeam", "trump", "round", "alone", "upcard", "tricksMaker", "pts", "winTeam", "euchred", "sweep", "callerEval"];
+    const cols = ["n", "src", "game", "dealer", "caller", "callerStyle", "callerTeam", "trump", "round", "alone", "upcard", "tricksMaker", "pts", "winTeam", "euchred", "sweep", "callerEval", "trumpCap", "ruleFired", "ruleDesc"];
     const lines = [cols.join(",")];
     for (const r of records) lines.push(cols.map((c) => r[c] ?? "").join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
@@ -616,6 +729,48 @@ export default function EuchreLab() {
   const seatLabel = (seat) => {
     if (seat === 0 && tab === "play") return "You";
     return `${SEAT_POS[seat]} · ${STYLES[styles[seat]].label}`;
+  };
+
+  const customRuleControls = (seat) => {
+    const rule = customRules[seat];
+    return (
+      <span className="custom-rule-block">
+        <label className="chk mini">
+          <input
+            type="checkbox"
+            checked={rule.enabled}
+            onChange={(e) => updateCustomRule(seat, { enabled: e.target.checked })}
+          />
+          Custom call rule
+        </label>
+        {rule.enabled && (
+          <span className="rule-fields">
+            <select value={rule.minCount} onChange={(e) => updateCustomRule(seat, { minCount: +e.target.value })}>
+              {[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}+ of a suit</option>)}
+            </select>
+            <label className="chk mini">
+              <input
+                type="checkbox"
+                checked={rule.requireBower}
+                onChange={(e) => updateCustomRule(seat, { requireBower: e.target.checked })}
+              />
+              needs a bower
+            </label>
+            <label className="chk mini">
+              <input
+                type="checkbox"
+                checked={rule.goAlone}
+                onChange={(e) => updateCustomRule(seat, { goAlone: e.target.checked })}
+              />
+              alone
+            </label>
+            <span className="rule-note">
+              Always calls the first suit with {rule.minCount}+ cards{rule.requireBower ? ", but only if it includes a bower" : " — even with no bower"}. Falls back to the style above otherwise.
+            </span>
+          </span>
+        )}
+      </span>
+    );
   };
 
   const renderTable = () => {
@@ -728,6 +883,7 @@ export default function EuchreLab() {
             <div className="sim-seat-name">{SEAT_POS[s]} {s % 2 === 0 ? "· Team A" : "· Team B"}</div>
             {styleSelect(s)}
             <div className="style-desc">{STYLES[styles[s]].desc}</div>
+            {customRuleControls(s)}
           </div>
         ))}
       </div>
@@ -767,10 +923,46 @@ export default function EuchreLab() {
           <thead><tr><th>Style</th><th>Calls</th><th>Net pts / call</th><th>Euchred %</th><th>Sweep %</th><th>Loners (made)</th></tr></thead>
           <tbody>
             {stats.styleRows.map((r) => (
-              <tr key={r.style}>
-                <td>{r.style}</td><td>{r.calls}</td>
+              <tr key={r.styleName}>
+                <td>{r.styleName}</td><td>{r.calls}</td>
                 <td className={r.netPerCall >= 0 ? "pos" : "neg"}>{r.netPerCall > 0 ? "+" : ""}{r.netPerCall}</td>
                 <td>{r.euchreRate}%</td><td>{r.sweepRate}%</td><td>{r.loners} ({r.lonersMade})</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {stats.ruleRows.length > 0 && (
+          <>
+            <h3>Custom call-rule performance</h3>
+            <p className="sub">Only hands where a seat's "custom call rule" actually fired the call (as opposed to falling back to its base style).</p>
+            <table className="data-table">
+              <thead><tr><th>Rule</th><th>Calls</th><th>Net pts / call</th><th>Euchred %</th><th>Sweep %</th></tr></thead>
+              <tbody>
+                {stats.ruleRows.map((r) => (
+                  <tr key={r.rule}>
+                    <td>{r.rule}</td><td>{r.calls}</td>
+                    <td className={r.netPerCall >= 0 ? "pos" : "neg"}>{r.netPerCall > 0 ? "+" : ""}{r.netPerCall}</td>
+                    <td>{r.euchreRate}%</td><td>{r.sweepRate}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+
+        <h3>Outcomes by caller's best trump card</h3>
+        <p className="sub">
+          "No trump higher than an ace" = No bowers row and below. "No trump higher than a king" = King-high row and below.
+        </p>
+        <table className="data-table">
+          <thead><tr><th>Caller held</th><th>Calls</th><th>Make %</th><th>Net pts / call</th><th>Euchred %</th></tr></thead>
+          <tbody>
+            {stats.capRows.map((r) => (
+              <tr key={r.cap}>
+                <td>{r.cap}</td><td>{r.calls}</td><td>{r.makeRate}%</td>
+                <td className={r.netPerCall >= 0 ? "pos" : "neg"}>{r.netPerCall > 0 ? "+" : ""}{r.netPerCall}</td>
+                <td>{r.euchreRate}%</td>
               </tr>
             ))}
           </tbody>
@@ -782,7 +974,7 @@ export default function EuchreLab() {
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={stats.styleRows}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#3a4a42" />
-                <XAxis dataKey="style" tick={{ fill: "#cfc8b8", fontSize: 12 }} />
+                <XAxis dataKey="styleName" tick={{ fill: "#cfc8b8", fontSize: 12 }} />
                 <YAxis tick={{ fill: "#cfc8b8", fontSize: 12 }} />
                 <Tooltip contentStyle={{ background: "#1d2a24", border: "1px solid #3a4a42", color: "#f0ead8" }} />
                 <Bar dataKey="netPerCall" name="Net pts/call">
@@ -796,7 +988,7 @@ export default function EuchreLab() {
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={stats.styleRows}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#3a4a42" />
-                <XAxis dataKey="style" tick={{ fill: "#cfc8b8", fontSize: 12 }} />
+                <XAxis dataKey="styleName" tick={{ fill: "#cfc8b8", fontSize: 12 }} />
                 <YAxis tick={{ fill: "#cfc8b8", fontSize: 12 }} />
                 <Tooltip contentStyle={{ background: "#1d2a24", border: "1px solid #3a4a42", color: "#f0ead8" }} />
                 <Bar dataKey="euchreRate" name="Euchred %" fill="#b3564a" />
@@ -859,7 +1051,7 @@ export default function EuchreLab() {
       {!records.length ? <p className="sub">Nothing logged yet.</p> : (
         <div className="log-scroll">
           <table className="data-table mono">
-            <thead><tr><th>#</th><th>Src</th><th>Game</th><th>Dealer</th><th>Caller</th><th>Style</th><th>Trump</th><th>Rd</th><th>Alone</th><th>Up</th><th>Tricks</th><th>Pts</th><th>Result</th></tr></thead>
+            <thead><tr><th>#</th><th>Src</th><th>Game</th><th>Dealer</th><th>Caller</th><th>Style</th><th>Trump</th><th>Rd</th><th>Alone</th><th>Up</th><th>Tricks</th><th>Pts</th><th>Result</th><th>Caller's top trump</th><th>Rule</th></tr></thead>
             <tbody>
               {records.slice(-300).reverse().map((r) => (
                 <tr key={r.src + r.n}>
@@ -870,6 +1062,8 @@ export default function EuchreLab() {
                   <td>{r.round}</td><td>{r.alone ? "★" : ""}</td><td>{r.upcard}</td>
                   <td>{r.tricksMaker}/5</td><td>{r.pts}</td>
                   <td className={r.euchred ? "neg" : "pos"}>{r.euchred ? "Euchred" : r.sweep ? "Sweep" : "Made"}</td>
+                  <td>{r.trumpCap ? TRUMP_CAP_LABEL[r.trumpCap] : ""}</td>
+                  <td>{r.ruleFired ? r.ruleDesc : ""}</td>
                 </tr>
               ))}
             </tbody>
@@ -897,9 +1091,9 @@ export default function EuchreLab() {
       {tab === "play" && (
         <>
           <div className="table-settings">
-            <span>West: {styleSelect(1)}</span>
-            <span>North (partner): {styleSelect(2)}</span>
-            <span>East: {styleSelect(3)}</span>
+            <span className="seat-setting">West: {styleSelect(1)} {customRuleControls(1)}</span>
+            <span className="seat-setting">North (partner): {styleSelect(2)} {customRuleControls(2)}</span>
+            <span className="seat-setting">East: {styleSelect(3)} {customRuleControls(3)}</span>
             <label className="chk"><input type="checkbox" checked={stickDealer} onChange={(e) => setStickDealer(e.target.checked)} /> Stick the dealer</label>
           </div>
           {renderTable()}
@@ -926,7 +1120,13 @@ const CSS = `
 
 .table-settings { display:flex; gap:18px; padding: 10px 26px; font-size:13px; color:#cfc8b8; flex-wrap:wrap; align-items:center; }
 .table-settings select, .sim-seat select { background:#1d2a24; color:#f0ead8; border:1px solid #3a4a42; border-radius:4px; padding:3px 6px; font-family:inherit; }
+.seat-setting { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .chk { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.chk.mini { font-size:12px; gap:4px; }
+.custom-rule-block { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; background:rgba(0,0,0,.2); border:1px solid #3a4a42; border-radius:6px; padding:4px 8px; }
+.rule-fields { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.rule-fields select { background:#1d2a24; color:#f0ead8; border:1px solid #3a4a42; border-radius:4px; padding:2px 5px; font-family:inherit; font-size:12px; }
+.rule-note { font-size:11px; color:#9aa89f; font-style:italic; max-width:220px; }
 
 .table-wrap { max-width: 900px; margin: 8px auto 0; padding: 0 16px; }
 .scoreboard { display:flex; align-items:center; justify-content:center; gap:18px; margin: 8px 0; }
