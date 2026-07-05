@@ -153,6 +153,23 @@ const TRUMP_CAP_LABEL = {
   Q: "Queen-high", "10": "10-high", "9": "9-high", none: "No trump",
 };
 
+/* ---------- how trump got called ---------- */
+const CALL_TYPE_ORDER = ["pickup", "orderedPartner", "orderedOpponent", "named", "stuck"];
+const CALL_TYPE_LABEL = {
+  pickup: "Picked it up (own upcard)",
+  orderedPartner: "Ordered up partner",
+  orderedOpponent: "Ordered up opponent",
+  named: "Named trump (turned down)",
+  stuck: "Stuck the dealer (forced)",
+};
+function classifyCallType(round, maker, dealer, forced) {
+  if (round === 1) {
+    if (maker === dealer) return "pickup";
+    return maker % 2 === dealer % 2 ? "orderedPartner" : "orderedOpponent";
+  }
+  return forced ? "stuck" : "named";
+}
+
 /* Round 1 bid: order the upcard's suit as trump? */
 function botBidR1(hand, upcard, seat, dealer, style, customRule) {
   const trump = upcard.suit;
@@ -191,7 +208,7 @@ function botBidR2(hand, turnedSuit, seat, dealer, style, stickDealer, customRule
       }
     }
     if (bestSuit) {
-      return { suit: bestSuit, alone: !!customRule.goAlone && hasBowerInSuit(hand, bestSuit), customFired: true };
+      return { suit: bestSuit, alone: !!customRule.goAlone && hasBowerInSuit(hand, bestSuit), customFired: true, forced: false };
     }
   }
   const cfg = STYLES[style];
@@ -202,8 +219,10 @@ function botBidR2(hand, turnedSuit, seat, dealer, style, stickDealer, customRule
     if (sc > bestScore) { bestScore = sc; best = s; }
   }
   const stuck = stickDealer && seat === dealer;
-  if (bestScore >= cfg.call - 0.3 || stuck) {
-    return { suit: best, alone: bestScore >= cfg.loner };
+  const meetsScore = bestScore >= cfg.call - 0.3;
+  if (meetsScore || stuck) {
+    // "forced" = the only reason this call happened is stick-the-dealer, not that the hand qualified on its own
+    return { suit: best, alone: bestScore >= cfg.loner, forced: stuck && !meetsScore };
   }
   return { suit: null };
 }
@@ -303,6 +322,7 @@ function runBidding(hands, upcard, dealer, styles, stickDealer, customRules) {
       return {
         trump: r.suit, maker: seat, alone: r.alone, round: 2,
         ruleFired: !!r.customFired, ruleDesc: r.customFired ? ruleDesc(customRules[seat]) : null,
+        forced: !!r.forced,
       };
     }
   }
@@ -316,9 +336,10 @@ function simulateHand(dealer, styles, stickDealer, customRules) {
   const bid = runBidding(hands, upcard, dealer, styles, stickDealer, customRules);
   if (!bid) return null; // redeal
 
-  const { trump, maker, alone, round, ruleFired, ruleDesc: rDesc } = bid;
+  const { trump, maker, alone, round, ruleFired, ruleDesc: rDesc, forced } = bid;
   const sitter = alone ? (maker + 2) % 4 : null;
   const callerScore = evalHand(hands[maker], trump);
+  const callType = classifyCallType(round, maker, dealer, forced);
 
   // dealer picks up on round 1 (if playing)
   if (round === 1 && sitter !== dealer) {
@@ -370,7 +391,7 @@ function simulateHand(dealer, styles, stickDealer, customRules) {
     trump, round, alone, upcard: cardId(upcard),
     tricksMaker: mTricks, pts, winTeam, euchred,
     sweep: mTricks === 5, callerEval: Math.round(callerScore * 10) / 10,
-    trumpCap, ruleFired: !!ruleFired, ruleDesc: rDesc || null,
+    trumpCap, ruleFired: !!ruleFired, ruleDesc: rDesc || null, callType,
   };
 }
 
@@ -457,6 +478,7 @@ export default function EuchreLab() {
   const [simDone, setSimDone] = useState(0);
   const simCancelRef = useRef(false);
   useEffect(() => () => { simCancelRef.current = true; }, []);
+  const [callTypeFilter, setCallTypeFilter] = useState("all");
 
   /* ---------------- interactive game state ---------------- */
   const [g, setG] = useState(null);
@@ -477,7 +499,7 @@ export default function EuchreLab() {
       msg: `${SEAT_POS[(dealer + 1) % 4]} bids first. Dealer: ${SEAT_POS[dealer]}.`,
       lastResult: null,
       played: [],
-      ruleFired: false, ruleDesc: null, trumpCap: null,
+      ruleFired: false, ruleDesc: null, trumpCap: null, callType: null,
     };
   }, []);
 
@@ -497,10 +519,11 @@ export default function EuchreLab() {
     };
   };
 
-  const applyCall = (st, seat, trump, alone, round, customFired = false, rule = null) => {
+  const applyCall = (st, seat, trump, alone, round, customFired = false, rule = null, forced = false) => {
     const sitter = alone ? (seat + 2) % 4 : null;
+    const callType = classifyCallType(round, seat, st.dealer, forced);
     let next = {
-      ...st, trump, maker: seat, alone, round, sitter,
+      ...st, trump, maker: seat, alone, round, sitter, callType,
       ruleFired: !!customFired, ruleDesc: customFired ? ruleDesc(rule) : null,
     };
     if (round === 1 && sitter !== st.dealer) {
@@ -533,7 +556,7 @@ export default function EuchreLab() {
       callerTeam: makerTeam, trump: st.trump, round: st.round, alone: st.alone,
       upcard: cardId(st.upcard), tricksMaker: mTricks, pts, winTeam, euchred,
       sweep: mTricks === 5, callerEval: null,
-      trumpCap: st.trumpCap, ruleFired: !!st.ruleFired, ruleDesc: st.ruleDesc || null,
+      trumpCap: st.trumpCap, ruleFired: !!st.ruleFired, ruleDesc: st.ruleDesc || null, callType: st.callType,
     };
     setRecords((r) => [...r, rec]);
 
@@ -588,7 +611,7 @@ export default function EuchreLab() {
         }
         if (st.phase === "bid2" && st.turn !== 0) {
           const r = botBidR2(st.hands[st.turn], st.upcard.suit, st.turn, st.dealer, styles[st.turn], stickDealer, customRules[st.turn]);
-          if (r.suit) return applyCall(st, st.turn, r.suit, r.alone, 2, r.customFired, customRules[st.turn]);
+          if (r.suit) return applyCall(st, st.turn, r.suit, r.alone, 2, r.customFired, customRules[st.turn], r.forced);
           if (st.turn === st.dealer) {
             gameCounter.current = st.gameNum;
             return { ...newDeal(st.score, (st.dealer + 1) % 4, st.gameNum), msg: "All passed — redeal." };
@@ -612,7 +635,7 @@ export default function EuchreLab() {
     return { ...st, turn: (st.turn + 1) % 4, msg: "You pass." };
   });
   const humanBid2 = (suit, alone) => setG((st) => {
-    if (suit) return applyCall(st, 0, suit, alone, 2);
+    if (suit) return applyCall(st, 0, suit, alone, 2, false, null, st.dealer === 0 && stickDealer);
     if (st.dealer === 0) {
       if (stickDealer) return st; // UI prevents this
       gameCounter.current = st.gameNum;
@@ -676,6 +699,34 @@ export default function EuchreLab() {
   /* ---------------- stats ---------------- */
   const stats = useMemo(() => {
     if (!records.length) return null;
+    const filteredRecords = callTypeFilter === "all"
+      ? records
+      : records.filter((r) => r.callType === callTypeFilter);
+
+    // "how trump got called" breakdown always reflects the full dataset, regardless of
+    // the filter above, so you can see the whole distribution while narrowed to one slice.
+    const byCallType = {};
+    for (const r of records) {
+      if (!r.callType) continue;
+      if (!byCallType[r.callType]) byCallType[r.callType] = { calls: 0, ptsFor: 0, ptsAgainst: 0, euchres: 0, sweeps: 0 };
+      const c = byCallType[r.callType];
+      c.calls++;
+      if (r.euchred) { c.euchres++; c.ptsAgainst += r.pts; } else { c.ptsFor += r.pts; if (r.sweep) c.sweeps++; }
+    }
+    const callTypeRows = CALL_TYPE_ORDER.filter((k) => byCallType[k]).map((k) => {
+      const c = byCallType[k];
+      return {
+        type: CALL_TYPE_LABEL[k], calls: c.calls,
+        makeRate: +(((c.calls - c.euchres) / c.calls) * 100).toFixed(1),
+        netPerCall: +((c.ptsFor - c.ptsAgainst) / c.calls).toFixed(3),
+        euchreRate: +((c.euchres / c.calls) * 100).toFixed(1),
+      };
+    });
+
+    if (!filteredRecords.length) {
+      return { total: 0, grandTotal: records.length, callTypeRows, empty: true };
+    }
+
     const byStyle = {};
     const bySeat = [0, 1, 2, 3].map(() => ({ calls: 0, pts: 0, euchres: 0 }));
     const bySuit = { S: 0, H: 0, D: 0, C: 0 };
@@ -684,7 +735,7 @@ export default function EuchreLab() {
     const byCap = {};
     let lonerAttempts = 0, lonerMade = 0, r1 = 0, r2 = 0;
 
-    for (const r of records) {
+    for (const r of filteredRecords) {
       const key = r.callerStyle;
       if (!byStyle[key]) byStyle[key] = { calls: 0, ptsFor: 0, ptsAgainst: 0, euchres: 0, sweeps: 0, loners: 0, lonersMade: 0 };
       const s = byStyle[key];
@@ -743,26 +794,26 @@ export default function EuchreLab() {
 
     // rolling maker-make rate (window 25)
     const W = 25, trend = [];
-    for (let i = W; i <= records.length; i += Math.max(1, Math.floor(W / 2))) {
-      const win = records.slice(i - W, i);
+    for (let i = W; i <= filteredRecords.length; i += Math.max(1, Math.floor(W / 2))) {
+      const win = filteredRecords.slice(i - W, i);
       const made = win.filter((r) => !r.euchred).length;
       trend.push({ hand: i, makeRate: +((made / W) * 100).toFixed(1) });
     }
 
     return {
-      total: records.length, r1, r2,
-      euchreRate: ((records.filter((r) => r.euchred).length / records.length) * 100).toFixed(1),
+      total: filteredRecords.length, grandTotal: records.length, r1, r2,
+      euchreRate: ((filteredRecords.filter((r) => r.euchred).length / filteredRecords.length) * 100).toFixed(1),
       lonerAttempts, lonerMade,
-      styleRows, ruleRows, capRows,
+      styleRows, ruleRows, capRows, callTypeRows,
       suitData: SUITS.map((s) => ({ suit: SUIT_NAME[s], count: bySuit[s] })),
       outcomeData: Object.entries(outcomes).map(([k, v]) => ({ outcome: k, count: v })),
       seatData: bySeat.map((s, i) => ({ seat: SEAT_POS[i], calls: s.calls, euchres: s.euchres })),
       trend,
     };
-  }, [records]);
+  }, [records, callTypeFilter]);
 
   const exportCSV = () => {
-    const cols = ["n", "src", "game", "dealer", "caller", "callerStyle", "callerTeam", "trump", "round", "alone", "upcard", "tricksMaker", "pts", "winTeam", "euchred", "sweep", "callerEval", "trumpCap", "ruleFired", "ruleDesc"];
+    const cols = ["n", "src", "game", "dealer", "caller", "callerStyle", "callerTeam", "trump", "round", "alone", "upcard", "tricksMaker", "pts", "winTeam", "euchred", "sweep", "callerEval", "trumpCap", "ruleFired", "ruleDesc", "callType"];
     const lines = [cols.join(",")];
     for (const r of records) lines.push(cols.map((c) => r[c] ?? "").join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv" });
@@ -1024,10 +1075,59 @@ export default function EuchreLab() {
 
   const COLORS = ["#c9a24b", "#7fae8f", "#b3564a", "#5b7a99", "#8b6f9e"];
 
+  const callTypeFilterSelect = (
+    <label className="chk">
+      How trump was called
+      <select value={callTypeFilter} onChange={(e) => setCallTypeFilter(e.target.value)}>
+        <option value="all">Any</option>
+        {CALL_TYPE_ORDER.map((k) => <option key={k} value={k}>{CALL_TYPE_LABEL[k]}</option>)}
+      </select>
+    </label>
+  );
+
+  const callTypeTable = (rows) => (
+    <>
+      <h3>Outcomes by how trump was called</h3>
+      <p className="sub">
+        Always shows every hand logged, regardless of the filter above — use it to compare "picked it up" vs.
+        "ordered up partner" vs. "ordered up opponent" vs. a free round-2 call vs. being stuck as dealer.
+      </p>
+      <table className="data-table">
+        <thead><tr><th>Call type</th><th>Calls</th><th>Make %</th><th>Net pts / call</th><th>Euchred %</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.type}>
+              <td>{r.type}</td><td>{r.calls}</td><td>{r.makeRate}%</td>
+              <td className={r.netPerCall >= 0 ? "pos" : "neg"}>{r.netPerCall > 0 ? "+" : ""}{r.netPerCall}</td>
+              <td>{r.euchreRate}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </>
+  );
+
   const renderStats = () => {
     if (!stats) return <div className="panel"><h2>No data yet</h2><p className="sub">Play some hands or run a simulation, then come back here.</p></div>;
+    if (stats.empty) {
+      return (
+        <div className="panel">
+          <div className="filter-row">{callTypeFilterSelect}</div>
+          <h2>No hands match that filter</h2>
+          <p className="sub">0 of {stats.grandTotal.toLocaleString()} logged hands were called that way. Try "Any", or a different call type.</p>
+          {callTypeTable(stats.callTypeRows)}
+        </div>
+      );
+    }
     return (
       <div className="panel">
+        <div className="filter-row">
+          {callTypeFilterSelect}
+          {callTypeFilter !== "all" && (
+            <span className="filter-note">Showing {stats.total.toLocaleString()} of {stats.grandTotal.toLocaleString()} logged hands.</span>
+          )}
+        </div>
+
         <div className="stat-strip">
           <div className="stat"><b>{stats.total.toLocaleString()}</b><span>hands logged</span></div>
           <div className="stat"><b>{stats.euchreRate}%</b><span>euchre rate</span></div>
@@ -1095,6 +1195,8 @@ export default function EuchreLab() {
             ))}
           </tbody>
         </table>
+
+        {callTypeTable(stats.callTypeRows)}
 
         <div className="chart-row">
           <div className="chart-box">
@@ -1179,7 +1281,7 @@ export default function EuchreLab() {
       {!records.length ? <p className="sub">Nothing logged yet.</p> : (
         <div className="log-scroll">
           <table className="data-table mono">
-            <thead><tr><th>#</th><th>Src</th><th>Game</th><th>Dealer</th><th>Caller</th><th>Style</th><th>Trump</th><th>Rd</th><th>Alone</th><th>Up</th><th>Tricks</th><th>Pts</th><th>Result</th><th>Caller's top trump</th><th>Rule</th></tr></thead>
+            <thead><tr><th>#</th><th>Src</th><th>Game</th><th>Dealer</th><th>Caller</th><th>Style</th><th>Trump</th><th>Rd</th><th>Alone</th><th>Up</th><th>Tricks</th><th>Pts</th><th>Result</th><th>Call type</th><th>Caller's top trump</th><th>Rule</th></tr></thead>
             <tbody>
               {records.slice(-300).reverse().map((r) => (
                 <tr key={r.src + r.n}>
@@ -1190,6 +1292,7 @@ export default function EuchreLab() {
                   <td>{r.round}</td><td>{r.alone ? "★" : ""}</td><td>{r.upcard}</td>
                   <td>{r.tricksMaker}/5</td><td>{r.pts}</td>
                   <td className={r.euchred ? "neg" : "pos"}>{r.euchred ? "Euchred" : r.sweep ? "Sweep" : "Made"}</td>
+                  <td>{r.callType ? CALL_TYPE_LABEL[r.callType] : ""}</td>
                   <td>{r.trumpCap ? TRUMP_CAP_LABEL[r.trumpCap] : ""}</td>
                   <td>{r.ruleFired ? r.ruleDesc : ""}</td>
                 </tr>
@@ -1338,6 +1441,9 @@ button.pcard { -webkit-appearance:none; }
 .sim-progress-fill { height:100%; background: linear-gradient(90deg, #c9a24b, #7fae8f); transition: width .12s linear; }
 .sim-progress-text { margin-top:6px; font-size:12px; color:#9aa89f; letter-spacing:.5px; }
 
+.filter-row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin: 16px 0 0; font-size:13px; color:#cfc8b8; }
+.filter-row select { background:#1d2a24; color:#f0ead8; border:1px solid #3a4a42; border-radius:4px; padding:4px 8px; margin-left:8px; font-family:inherit; }
+.filter-note { font-size:12px; color:#9aa89f; font-style:italic; }
 .stat-strip { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin: 16px 0; }
 .stat { background:#1d2a24; border:1px solid #3a4a42; border-radius:8px; padding:8px 16px; display:flex; flex-direction:column; align-items:center; }
 .stat b { font-size:20px; color:#c9a24b; } .stat span { font-size:11px; color:#9aa89f; text-transform:uppercase; letter-spacing:1px; }
